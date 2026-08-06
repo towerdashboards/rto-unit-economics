@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RTO Unit Economics — v1.0</title>
+<style>
+  /* deliberately bare — enough to read, nothing more; real styling is a later feature */
+  body{font:14px/1.45 system-ui, sans-serif; margin:24px; max-width:860px;}
+  h1{font-size:18px;} h2{font-size:14px; margin:22px 0 6px; text-transform:uppercase; letter-spacing:.05em; color:#666;}
+  table{border-collapse:collapse; width:100%;}
+  th,td{text-align:left; padding:4px 8px; border-bottom:1px solid #ddd; font-variant-numeric:tabular-nums;}
+  td.n, th.n{text-align:right;}
+  tr.tot td{font-weight:600; border-top:2px solid #999;}
+  input{width:90px; padding:3px 6px; font:inherit; text-align:right;}
+  .basis{color:#888; font-size:12px;}
+  .neg{color:#b00020;} .pos{color:#0a7a3d;}
+  #kpis{display:flex; gap:28px; margin:14px 0 4px; font-size:13px; color:#666;}
+  #kpis b{display:block; font-size:20px; color:#111;}
+</style>
+</head>
+<body>
+<h1>RTO Unit Economics <span style="color:#999; font-weight:400;">v1.0 — weekly portfolio P&amp;L</span></h1>
+
+<div id="kpis"></div>
+
+<h2>Portfolio</h2>
+<table id="params"><tbody>
+  <tr><td>Units owned</td><td class="n"><input id="cap" value="0"></td>
+      <td class="basis">everything on the books, earning or not</td></tr>
+  <tr><td>Active contracts</td><td class="n"><input id="active" value="0"></td>
+      <td class="basis">units currently out on a paying contract</td></tr>
+  <tr><td>Collection efficiency %</td><td class="n"><input id="collEff" value="95"></td>
+      <td class="basis">share of scheduled billings actually collected — multiplies payment-based revenue</td></tr>
+</tbody></table>
+
+<h2>Weekly P&amp;L</h2>
+<table id="pl">
+  <thead><tr><th>Line</th><th>Rate</th><th class="basis">Basis</th><th class="n">Weekly $</th></tr></thead>
+  <tbody id="plBody"></tbody>
+</table>
+
+<script>
+"use strict";
+/* ============ MODEL ============
+   The whole architecture in three ideas:
+   1. S holds portfolio parameters.
+   2. Every P&L line declares a BASIS — the volume its rate multiplies.
+   3. compute() walks the lines. Revenue lines are valued first so %-of-revenue
+      bases (later) have a number to bite on. Nothing else is special-cased. */
+
+const S = { cap:0, active:0, collEff:95 };
+
+/* rev:true lines add; the rest subtract. Blank canvas: every rate starts at 0. */
+const LINES = [
+  {id:"rev_pmt", label:"Contract payments", basis:"contractColl", rate:0, rev:true},
+  {id:"rev_fee", label:"Late & other fees", basis:"contract",     rate:0, rev:true},
+  {id:"sv_rm",   label:"Repairs & maintenance", basis:"contract", rate:0},
+  {id:"un_ins",  label:"Fleet insurance",       basis:"unit",     rate:0},
+  {id:"ga_rent", label:"Rent",                  basis:"site",     rate:0},
+];
+
+const BASIS = {
+  contractColl:{label:"× active × collection eff.", unit:"$/contract/wk",
+                vol:P => P.active * P.collEff/100},
+  contract:    {label:"× active contracts",         unit:"$/contract/wk",
+                vol:P => P.active},
+  unit:        {label:"× units owned",              unit:"$/unit/wk",
+                vol:P => P.cap},
+  site:        {label:"per site",                   unit:"$/wk",
+                vol:() => 1},
+};
+
+function compute(P, lines){
+  const val = l => l.rate * BASIS[l.basis].vol(P);
+  const revRows  = lines.filter(l=>l.rev) .map(l=>({...l, value:val(l)}));
+  const costRows = lines.filter(l=>!l.rev).map(l=>({...l, value:val(l)}));
+  const revenue   = revRows.reduce((a,r)=>a+r.value, 0);
+  const totalCost = costRows.reduce((a,r)=>a+r.value, 0);
+  const profit = revenue - totalCost;
+  return {revRows, costRows, revenue, totalCost, profit,
+          margin: revenue>0 ? profit/revenue : 0,
+          util:   P.cap>0   ? P.active/P.cap : 0,
+          rpud:   P.cap>0   ? revenue/P.cap/7 : 0};
+}
+
+/* ============ VIEW ============ */
+const $ = id => document.getElementById(id);
+const fM = n => (n<0?"-":"") + "$" + Math.abs(Math.round(n)).toLocaleString();
+const fP = n => (n*100).toFixed(1) + "%";
+
+function buildTable(){
+  const row = l =>
+    '<tr><td>'+l.label+'</td>'+
+    '<td><input data-rate="'+l.id+'" value="0"> <span class="basis">'+BASIS[l.basis].unit+'</span></td>'+
+    '<td class="basis">'+BASIS[l.basis].label+'</td>'+
+    '<td class="n" data-val="'+l.id+'">$0</td></tr>';
+  $("plBody").innerHTML =
+    LINES.filter(l=>l.rev).map(row).join("") +
+    '<tr class="tot"><td colspan="3">Revenue</td><td class="n" id="tRev">$0</td></tr>' +
+    LINES.filter(l=>!l.rev).map(row).join("") +
+    '<tr class="tot"><td colspan="3">Total cost</td><td class="n" id="tCost">$0</td></tr>' +
+    '<tr class="tot"><td colspan="3">Net profit</td><td class="n" id="tProfit">$0</td></tr>';
+}
+
+function render(){
+  const R = compute(S, LINES);
+  R.revRows.concat(R.costRows).forEach(r=>{
+    document.querySelector('[data-val="'+r.id+'"]').textContent = fM(r.value);
+  });
+  $("tRev").textContent = fM(R.revenue);
+  $("tCost").textContent = fM(R.totalCost);
+  const p = $("tProfit");
+  p.textContent = fM(R.profit);
+  p.className = "n " + (R.profit>=0 ? "pos" : "neg");
+  $("kpis").innerHTML =
+    '<span>Revenue<b>'+fM(R.revenue)+'</b></span>'+
+    '<span>Cost<b>'+fM(R.totalCost)+'</b></span>'+
+    '<span>Profit<b class="'+(R.profit>=0?"pos":"neg")+'">'+fM(R.profit)+'</b></span>'+
+    '<span>Margin<b>'+fP(R.margin)+'</b></span>'+
+    '<span>Utilization<b>'+fP(R.util)+'</b></span>'+
+    '<span>RPU/D<b>$'+R.rpud.toFixed(2)+'</b></span>';
+}
+
+const num = (raw, prev) => {
+  const v = parseFloat(String(raw).replace(/[^0-9.\-]/g,""));
+  return isFinite(v) ? v : prev;
+};
+document.addEventListener("input", e=>{
+  const rid = e.target.getAttribute("data-rate");
+  if(rid){ const l = LINES.find(x=>x.id===rid); l.rate = num(e.target.value, l.rate); render(); return; }
+  if(e.target.id in S){ S[e.target.id] = num(e.target.value, S[e.target.id]); render(); }
+});
+
+buildTable();
+render();
+</script>
+</body>
+</html>
